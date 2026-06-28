@@ -20,6 +20,7 @@ import { ResultsPanel } from './components/ResultsPanel'
 import { ReviewDialog } from './components/ReviewDialog'
 import { SongInputPanel } from './components/SongInputPanel'
 import { usePlaylistBuilder } from './hooks/usePlaylistBuilder'
+import { getYoutubeBridge } from './services/bridge'
 import { parseSongsFromText } from './services/parseSongs'
 import { usePlaylistStore } from './store/usePlaylistStore'
 
@@ -38,18 +39,18 @@ function App() {
 
   const authQuery = useQuery({
     queryKey: ['auth-status'],
-    queryFn: () => window.youtubeBridge.getAuthStatus(),
+    queryFn: () => getYoutubeBridge().getAuthStatus(),
   })
 
   const signInMutation = useMutation({
-    mutationFn: () => window.youtubeBridge.signIn(),
+    mutationFn: () => getYoutubeBridge().signIn(),
     onSuccess: () => {
       authQuery.refetch()
     },
   })
 
   const signOutMutation = useMutation({
-    mutationFn: () => window.youtubeBridge.signOut(),
+    mutationFn: () => getYoutubeBridge().signOut(),
     onSuccess: () => {
       authQuery.refetch()
     },
@@ -138,6 +139,17 @@ function App() {
               </Alert>
             )}
 
+            {signInMutation.error && (
+              <Alert severity="error">
+                Sign-in failed:{' '}
+                {signInMutation.error instanceof Error
+                  ? signInMutation.error.message
+                  : 'Unknown OAuth error'}
+              </Alert>
+            )}
+
+            {builder.runError && <Alert severity="error">Playlist build failed: {builder.runError}</Alert>}
+
             <Stack direction={{ xs: 'column', lg: 'row' }} spacing={3} alignItems="stretch">
               <Stack spacing={3} flex={1.2}>
                 <PlaylistForm
@@ -173,7 +185,9 @@ function App() {
                       size="large"
                       startIcon={builder.isBusy ? <CircularProgress size={18} /> : <PlaylistAddRoundedIcon />}
                       disabled={!canCreate}
-                      onClick={handleStart}
+                      onClick={() => {
+                        void handleStart()
+                      }}
                     >
                       Create Playlist
                     </Button>

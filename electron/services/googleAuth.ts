@@ -1,16 +1,20 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { shell, app } from 'electron'
 import { google } from 'googleapis'
 import type { AuthStatus } from '../../src/types/shared.js'
 
-const REDIRECT_URI = 'http://127.0.0.1:42813/oauth2callback'
+const REDIRECT_PATH = '/oauth2callback'
+const LOOPBACK_HOST = '127.0.0.1'
+const DEFAULT_REDIRECT_URI = `http://${LOOPBACK_HOST}`
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube',
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
 ]
+const REQUIRED_YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube'
 
 interface StoredTokens {
   access_token?: string
@@ -38,11 +42,19 @@ function normalizeTokens(tokens: IncomingTokens): StoredTokens {
   }
 }
 
+function hasRequiredYoutubeScope(scopeValue?: string): boolean {
+  if (!scopeValue) {
+    return false
+  }
+
+  return scopeValue.split(' ').includes(REQUIRED_YOUTUBE_SCOPE)
+}
+
 function getTokenPath(): string {
   return path.join(app.getPath('userData'), 'google-oauth-token.json')
 }
 
-function createClient() {
+function createClient(redirectUri = DEFAULT_REDIRECT_URI) {
   const clientId = process.env.GOOGLE_CLIENT_ID
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET
 
@@ -50,7 +62,7 @@ function createClient() {
     throw new Error('Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in environment')
   }
 
-  return new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI)
+  return new google.auth.OAuth2(clientId, clientSecret, redirectUri)
 }
 
 async function readStoredTokens(): Promise<StoredTokens | null> {
@@ -67,16 +79,31 @@ async function saveTokens(tokens: StoredTokens): Promise<void> {
   await fs.writeFile(getTokenPath(), JSON.stringify(tokens, null, 2), 'utf8')
 }
 
-async function exchangeCode(code: string): Promise<StoredTokens> {
-  const oauth2 = createClient()
+async function exchangeCode(code: string, redirectUri: string): Promise<StoredTokens> {
+  const oauth2 = createClient(redirectUri)
   const { tokens } = await oauth2.getToken(code)
   return normalizeTokens(tokens)
 }
 
-async function waitForCode(): Promise<string> {
+async function waitForCode(): Promise<{ code: string; redirectUri: string }> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
-      const url = new URL(req.url ?? '', REDIRECT_URI)
+      const address = server.address() as AddressInfo | null
+      if (!address) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' })
+        res.end('OAuth server not ready. You can close this window.')
+        return
+      }
+
+      const redirectUri = `http://${LOOPBACK_HOST}:${address.port}${REDIRECT_PATH}`
+      const url = new URL(req.url ?? '', redirectUri)
+
+      if (url.pathname !== REDIRECT_PATH) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' })
+        res.end('Not found')
+        return
+      }
+
       const code = url.searchParams.get('code')
       const error = url.searchParams.get('error')
 
@@ -97,26 +124,43 @@ async function waitForCode(): Promise<string> {
       res.writeHead(200, { 'Content-Type': 'text/plain' })
       res.end('Authorization complete. You can return to the app.')
       server.close()
-      resolve(code)
+      resolve({ code, redirectUri })
     })
 
-    server.listen(42813, '127.0.0.1')
+    server.on('error', (error) => {
+      reject(error)
+    })
+
+    server.listen(0, LOOPBACK_HOST, async () => {
+      try {
+        const address = server.address() as AddressInfo | null
+        if (!address) {
+          throw new Error('Failed to acquire local OAuth callback port')
+        }
+
+        const redirectUri = `http://${LOOPBACK_HOST}:${address.port}${REDIRECT_PATH}`
+        const oauth2 = createClient(redirectUri)
+        const authUrl = oauth2.generateAuthUrl({
+          access_type: 'offline',
+          prompt: 'consent',
+          scope: SCOPES,
+        })
+
+        await shell.openExternal(authUrl)
+      } catch (error) {
+        server.close()
+        reject(error)
+      }
+    })
   })
 }
 
 export async function signInWithGoogle(): Promise<AuthStatus> {
-  const oauth2 = createClient()
-  const authUrl = oauth2.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
-    scope: SCOPES,
-  })
-
-  await shell.openExternal(authUrl)
-  const code = await waitForCode()
-  const tokens = await exchangeCode(code)
+  const { code, redirectUri } = await waitForCode()
+  const tokens = await exchangeCode(code, redirectUri)
   await saveTokens(normalizeTokens(tokens))
 
+  const oauth2 = createClient(redirectUri)
   oauth2.setCredentials(normalizeTokens(tokens))
   const oauth2Api = google.oauth2({ auth: oauth2, version: 'v2' })
   const { data } = await oauth2Api.userinfo.get()
@@ -131,6 +175,10 @@ export async function signInWithGoogle(): Promise<AuthStatus> {
 export async function getAuthorizedClient() {
   const tokens = await readStoredTokens()
   if (!tokens?.access_token && !tokens?.refresh_token) {
+    return null
+  }
+
+  if (!hasRequiredYoutubeScope(tokens.scope)) {
     return null
   }
 

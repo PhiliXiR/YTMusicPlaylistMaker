@@ -17,7 +17,7 @@ function createWindow() {
             preload: path.join(app.getAppPath(), 'dist-electron/electron/preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
-            sandbox: true,
+            sandbox: false,
         },
     });
     if (isDev) {

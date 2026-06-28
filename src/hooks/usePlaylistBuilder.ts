@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import { getYoutubeBridge } from '../services/bridge'
 import type {
   PlaylistRequest,
   SearchCandidate,
@@ -23,22 +24,23 @@ export function usePlaylistBuilder() {
   const [phase, setPhase] = useState<BuildPhase>('idle')
   const [playlistUrl, setPlaylistUrl] = useState('')
   const [currentSong, setCurrentSong] = useState('')
+  const [runError, setRunError] = useState<string | null>(null)
   const [stats, setStats] = useState<BuildStats>(initialStats(0))
   const [failedSongs, setFailedSongs] = useState<FailedSong[]>([])
   const [manualReview, setManualReview] = useState<ManualReviewState | null>(null)
   const manualResolveRef = useRef<((value: SearchCandidate | null) => void) | null>(null)
 
   const createPlaylistMutation = useMutation({
-    mutationFn: (payload: PlaylistRequest) => window.youtubeBridge.createPlaylist(payload),
+    mutationFn: (payload: PlaylistRequest) => getYoutubeBridge().createPlaylist(payload),
   })
 
   const searchMutation = useMutation({
-    mutationFn: (song: SongInput) => window.youtubeBridge.searchCandidates(song),
+    mutationFn: (song: SongInput) => getYoutubeBridge().searchCandidates(song),
   })
 
   const addMutation = useMutation({
     mutationFn: ({ playlistId, videoId }: { playlistId: string; videoId: string }) =>
-      window.youtubeBridge.addToPlaylist(playlistId, videoId),
+      getYoutubeBridge().addToPlaylist(playlistId, videoId),
   })
 
   async function resolveCandidate(song: SongInput): Promise<{ candidate: SearchCandidate | null; manual: boolean }> {
@@ -92,52 +94,68 @@ export function usePlaylistBuilder() {
 
   async function buildPlaylist(payload: PlaylistRequest, songs: SongInput[]): Promise<void> {
     if (songs.length === 0) {
-      throw new Error('No songs to process. Paste songs first.')
+      setPhase('error')
+      setRunError('No songs to process. Paste songs first.')
+      return
     }
 
     setPhase('creating-playlist')
+    setRunError(null)
     setStats(initialStats(songs.length))
     setFailedSongs([])
-
-    const { playlistId, playlistUrl: createdUrl } = await createPlaylistMutation.mutateAsync(payload)
-    setPlaylistUrl(createdUrl)
-
-    setPhase('searching')
-
-    for (const song of songs) {
-      setCurrentSong(song.raw)
-
-      try {
-        const resolved = await resolveCandidate(song)
-
-        if (!resolved.candidate) {
-          setFailedSongs((prev) => [...prev, { song, reason: 'No confident match found' }])
-          setStats((prev) => ({ ...prev, failed: prev.failed + 1, skipped: prev.skipped + 1 }))
-          continue
-        }
-
-        await addMutation.mutateAsync({ playlistId, videoId: resolved.candidate.videoId })
-
-        setStats((prev) => ({
-          ...prev,
-          added: prev.added + 1,
-          manualSelections: prev.manualSelections + (resolved.manual ? 1 : 0),
-        }))
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : 'Unexpected error'
-        setFailedSongs((prev) => [...prev, { song, reason }])
-        setStats((prev) => ({ ...prev, failed: prev.failed + 1, skipped: prev.skipped + 1 }))
-      }
-    }
-
+    setPlaylistUrl('')
     setCurrentSong('')
-    setPhase('completed')
+
+    try {
+      const { playlistId, playlistUrl: createdUrl } = await createPlaylistMutation.mutateAsync(payload)
+      setPlaylistUrl(createdUrl)
+
+      setPhase('searching')
+
+      for (const song of songs) {
+        setCurrentSong(song.raw)
+
+        try {
+          const resolved = await resolveCandidate(song)
+
+          if (!resolved.candidate) {
+            setFailedSongs((prev) => [...prev, { song, reason: 'No confident match found' }])
+            setStats((prev) => ({ ...prev, failed: prev.failed + 1, skipped: prev.skipped + 1 }))
+            continue
+          }
+
+          await addMutation.mutateAsync({ playlistId, videoId: resolved.candidate.videoId })
+
+          setStats((prev) => ({
+            ...prev,
+            added: prev.added + 1,
+            manualSelections: prev.manualSelections + (resolved.manual ? 1 : 0),
+          }))
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'Unexpected error'
+          setFailedSongs((prev) => [...prev, { song, reason }])
+          setStats((prev) => ({ ...prev, failed: prev.failed + 1, skipped: prev.skipped + 1 }))
+        }
+      }
+
+      setCurrentSong('')
+      setPhase('completed')
+    } catch (error) {
+      const reason =
+        error instanceof Error
+          ? error.message
+          : 'Failed to create playlist. Check Google auth and YouTube API setup.'
+      setRunError(reason)
+      setCurrentSong('')
+      setPhase('error')
+    }
   }
 
   function resetRunState(): void {
     setPhase('idle')
     setCurrentSong('')
     setPlaylistUrl('')
+    setRunError(null)
     setStats(initialStats(0))
     setFailedSongs([])
     setManualReview(null)
@@ -157,6 +175,7 @@ export function usePlaylistBuilder() {
     currentSong,
     playlistUrl,
     stats,
+    runError,
     failedSongs,
     manualReview,
     progress,

@@ -24,8 +24,10 @@ Desktop utility to create YouTube playlists from pasted song lists with smart ma
    - GOOGLE_CLIENT_SECRET
 4. In Google Cloud Console:
    - Enable YouTube Data API v3
-   - Create OAuth Client (Desktop app)
-   - Add redirect URI: http://127.0.0.1:42813/oauth2callback
+   - Create OAuth Client ID as Desktop app (recommended)
+   - Add your account as a Test User in OAuth consent screen if app is in Testing mode
+
+Note: For Desktop OAuth clients, you do not need to manually configure a fixed redirect URI.
 
 ## Scripts
 
